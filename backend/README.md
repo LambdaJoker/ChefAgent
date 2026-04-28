@@ -1,4 +1,4 @@
-# AI 私厨后端（FastAPI + Minimax + OSS）
+# ChefAgent 后端（FastAPI + Minimax + OSS）
 
 ## 1. 模块说明
 
@@ -20,7 +20,7 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ## 3. 环境变量（详细）
 
 ### 3.1 服务配置
-- `APP_NAME=AI私厨 Backend`
+- `APP_NAME=ChefAgent Backend`
 - `APP_HOST=0.0.0.0`
 - `APP_PORT=8000`
 - `FRONTEND_ORIGIN=http://localhost:5173`

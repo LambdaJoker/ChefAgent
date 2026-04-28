@@ -1,4 +1,4 @@
-# AI 私厨前端（Vue 3 + Vite）
+# ChefAgent 前端（Vue 3 + Vite）
 
 ## 1. 页面能力
 

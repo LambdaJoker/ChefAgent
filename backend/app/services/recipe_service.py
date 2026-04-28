@@ -2,7 +2,24 @@ from app.models.schemas import RecipeItem
 
 
 class RecipeService:
+    """
+    功能:
+        提供基于食材匹配度的智能菜谱推荐服务。
+    关键流程:
+        1) 维护本地基础菜谱池。
+        2) 基于匹配度、营养分与难度综合计算推荐得分并排序。
+    """
     def __init__(self) -> None:
+        """
+        功能:
+            初始化菜谱服务，加载默认的菜谱池数据。
+        参数:
+            无。
+        返回值:
+            None
+        关键流程:
+            1) 初始化基础菜谱列表到实例属性中。
+        """
         self.recipe_pool = [
             {
                 "name": "番茄炒蛋",
@@ -42,6 +59,22 @@ class RecipeService:
         ]
 
     def recommend(self, ingredients: list[str], top_k: int = 5) -> list[RecipeItem]:
+        """
+        功能:
+            基于用户提供的可用食材计算推荐得分并返回 Top-K 菜谱。
+        参数:
+            ingredients: 用户当前的可用食材列表。
+            top_k: 期望返回的最高分菜谱数量。
+        返回值:
+            list[RecipeItem]: 排序后的菜谱模型列表。
+        关键流程:
+            1) 标准化用户食材（去空去重）。
+            2) 遍历菜谱池计算匹配度、营养分与难度得分。
+            3) 按加权总分倒序排列。
+            4) 兜底策略：若无匹配项返回创意拼盘。
+        异常处理:
+            无显式异常。
+        """
         normalized = {item.strip().lower() for item in ingredients if item.strip()}
         ranked: list[RecipeItem] = []
 

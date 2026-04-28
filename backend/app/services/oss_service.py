@@ -8,7 +8,24 @@ from app.core.config import Settings
 
 
 class OssService:
+    """
+    功能:
+        封装阿里云 OSS 的文件上传与状态检查服务。
+    关键流程:
+        1) 提供基础的配置检查方法。
+        2) 提供图片流式上传接口并返回可访问的 URL。
+    """
     def __init__(self, settings: Settings) -> None:
+        """
+        功能:
+            初始化 OSS 服务依赖。
+        参数:
+            settings: 应用配置实例，包含 OSS 密钥与 endpoint。
+        返回值:
+            None
+        关键流程:
+            1) 绑定配置对象以备后续调用。
+        """
         self.settings = settings
 
     def is_configured(self) -> bool:

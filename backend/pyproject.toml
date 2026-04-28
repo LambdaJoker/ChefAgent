@@ -1,7 +1,7 @@
 [project]
 name = "chefagent-backend"
 version = "0.1.0"
-description = "AI 私厨后端服务（FastAPI + LangChain + Minimax）"
+description = "ChefAgent 后端服务（FastAPI + LangChain）"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,6 +12,9 @@ dependencies = [
     "pydantic-settings>=2.3.0",
     "langchain>=0.2.0",
     "oss2>=2.19.1",
+    "tavily-python>=0.7.24",
+    "langgraph>=1.1.10",
+    "langgraph-checkpoint-sqlite>=3.0.3",
 ]
 
 [dependency-groups]
