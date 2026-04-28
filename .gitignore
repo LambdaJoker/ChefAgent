@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+frontend/node_modules/
+# Environment files
+.env
+backend/.env
+frontend/.env
+
+# Frontend-generated files
+frontend/node_modules/
+frontend/dist/
+
+.trae/
