@@ -58,28 +58,19 @@
 
             <!-- AI Content -->
             <template v-if="msg.role === 'ai'">
-              <div
-                v-if="msg.status === 'streaming'"
-                class="mb-3 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2"
-              >
-                <div class="flex items-center gap-2 text-sm text-blue-700">
-                  <Loader2 class="w-4 h-4 animate-spin text-blue-500" />
-                  <span>{{ getStreamingStatusLabel(msg) }}</span>
-                </div>
-                <div
-                  v-if="getStreamingStatusDetail(msg)"
-                  class="mt-1 whitespace-pre-wrap break-words pl-6 text-xs leading-relaxed text-blue-600"
-                >
-                  {{ getStreamingStatusDetail(msg) }}
-                </div>
+              <!-- Thinking Status Indicator (Before first content arrives) -->
+              <div v-if="msg.thinking && !hasContent(msg.content)" class="flex items-center gap-2 text-sm text-gray-500 py-1">
+                <Loader2 class="w-4 h-4 animate-spin text-blue-500" />
+                <span>{{ getStreamingStatusLabel(msg) }}</span>
               </div>
+
+              <!-- Markdown Content -->
               <div
-                v-if="hasRenderableAiContent(msg)"
-                :class="msg.status === 'streaming'
-                  ? 'whitespace-pre-wrap break-words text-[15px] leading-relaxed'
-                  : 'prose prose-sm sm:prose-base max-w-none break-words'"
-                v-html="msg.status === 'streaming' ? renderStreamingContent(msg) : renderMarkdown(msg.content)"
+                v-if="hasContent(msg.content)"
+                class="prose prose-sm sm:prose-base max-w-none break-words"
+                v-html="renderMarkdown(msg.content)"
               ></div>
+              
               <div
                 v-if="msg.status === 'interrupted'"
                 class="mt-3 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500"
@@ -94,20 +85,31 @@
             </div>
 
             <!-- Time Taken Indicator & Actions -->
-            <div v-if="msg.role === 'ai' && msg.status !== 'streaming' && hasContent(msg.content)" class="mt-3 flex items-center justify-between text-xs text-gray-400 font-mono">
-              <div v-if="msg.timeTaken" class="flex items-center gap-1.5">
+            <div v-if="msg.status !== 'streaming' && hasContent(msg.content)" class="mt-3 flex items-center justify-between text-xs text-gray-400 font-mono">
+              <div v-if="msg.role === 'ai' && msg.timeTaken" class="flex items-center gap-1.5">
                 <Clock class="w-3.5 h-3.5" />
                 <span>耗时 {{ (msg.timeTaken / 1000).toFixed(1) }}s</span>
               </div>
               <div v-else></div>
-              <button 
-                @click="copyToClipboard(msg.content)"
-                class="flex items-center gap-1 hover:text-gray-600 hover:bg-gray-100 transition-colors px-2 py-1 rounded"
-                title="复制内容"
-              >
-                <Copy class="w-3.5 h-3.5" />
-                <span>复制</span>
-              </button>
+              <div class="flex items-center gap-2">
+                <button 
+                  v-if="msg.role === 'ai'"
+                  @click="copyToClipboard(msg.content)"
+                  class="flex items-center gap-1 hover:text-gray-600 hover:bg-gray-100 transition-colors px-2 py-1 rounded"
+                  title="复制内容"
+                >
+                  <Copy class="w-3.5 h-3.5" />
+                  <span>复制</span>
+                </button>
+                <button 
+                  @click="$emit('deleteMessage', msg.id)"
+                  class="flex items-center gap-1 hover:text-red-500 hover:bg-red-50 transition-colors px-2 py-1 rounded"
+                  title="删除消息"
+                >
+                  <Trash2 class="w-3.5 h-3.5" />
+                  <span>删除</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -175,7 +177,20 @@
             <div class="text-xs text-gray-400 hidden sm:block" aria-hidden="true">
               按 Enter 发送，Shift + Enter 换行
             </div>
+            
             <button 
+              v-if="isGenerating"
+              @click="$emit('stop')"
+              class="px-3 py-2 rounded-xl transition-all flex items-center justify-center shadow-sm bg-red-50 text-red-600 hover:bg-red-100 outline-none"
+              title="停止生成"
+              aria-label="停止生成"
+            >
+              <div class="w-2.5 h-2.5 bg-red-600 rounded-sm mr-1.5"></div>
+              <span class="text-sm font-medium">停止</span>
+            </button>
+
+            <button 
+              v-else
               @click="sendMessage"
               class="p-2 rounded-xl transition-all flex items-center justify-center shadow-sm focus:ring-2 focus:ring-blue-500/20 outline-none"
               title="发送消息"
@@ -185,7 +200,7 @@
                   ? 'bg-blue-600 hover:bg-blue-700 text-white' 
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               ]"
-              :disabled="(!inputMessage.trim() && !previewImage) || isGenerating || isUploading"
+              :disabled="(!inputMessage.trim() && !previewImage) || isUploading"
             >
               <ArrowUp class="w-5 h-5" />
             </button>
@@ -202,7 +217,7 @@
 
 <script setup>
 import { ref, watch, nextTick, onMounted } from 'vue'
-import { ChefHat, Bot, User, ArrowUp, Image as ImageIcon, Loader2, Clock, X, Copy, Download } from 'lucide-vue-next'
+import { ChefHat, Bot, User, ArrowUp, Image as ImageIcon, Loader2, Clock, X, Copy, Download, Trash2 } from 'lucide-vue-next'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
@@ -222,7 +237,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['send'])
+const emit = defineEmits(['send', 'stop', 'deleteMessage'])
 
 const inputMessage = ref('')
 const inputRef = ref(null)
@@ -252,37 +267,43 @@ const renderMarkdown = (content) => {
   
   // Handle <think> tags for reasoning models
   if (processed.includes('<think>')) {
-    if (!processed.includes('</think>')) {
-      processed = processed.replace(
-        /<think>/g, 
-        `<div class="thinking-wrapper mb-4">
-          <details open class="thinking-block group">
-            <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
-              <span class="inline-block animate-pulse text-blue-500">●</span>
-              <span>深入思考中...</span>
-            </summary>
-            <div class="mt-2 pl-3 border-l-2 border-blue-100 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">`
-      )
-      processed += '</div></details></div>'
-    } else {
-      processed = processed.replace(
-        /<think>/g, 
-        `<div class="thinking-wrapper mb-4">
+    // Replace all complete <think>...</think> blocks
+    processed = processed.replace(
+      /<think>([\s\S]*?)<\/think>/g, 
+      (match, innerContent) => {
+        return `<div class="thinking-wrapper mb-4">
           <details class="thinking-block group">
             <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
               <span class="inline-block transition-transform text-[10px] group-open:rotate-90">▶</span>
               <span>思考过程</span>
             </summary>
-            <div class="mt-2 pl-3 border-l-2 border-gray-200 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">`
-      )
+            <div class="mt-2 pl-3 border-l-2 border-gray-200 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
+          </details>
+        </div>`
+      }
+    )
+    
+    // Handle any remaining unclosed <think> tag at the end
+    if (processed.includes('<think>')) {
       processed = processed.replace(
-        /<\/think>/g, 
-        `</div></details></div>`
+        /<think>([\s\S]*)$/g, 
+        (match, innerContent) => {
+          return `<div class="thinking-wrapper mb-4">
+            <details open class="thinking-block group">
+              <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
+                <span class="inline-block animate-pulse text-blue-500">●</span>
+                <span>深入思考中...</span>
+              </summary>
+              <div class="mt-2 pl-3 border-l-2 border-blue-100 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
+            </details>
+          </div>`
+        }
       )
     }
   }
 
-  return md.render(processed)
+  // 哪怕最后没有普通文本，也要把 HTML 渲染出来，否则页面是空白的
+  return md.render(processed) || processed
 }
 
 const escapeHtml = (content) => {

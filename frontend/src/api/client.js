@@ -2,20 +2,6 @@ import axios from "axios";
 
 const STREAM_DEBUG = import.meta.env.DEV;
 
-const findSseSeparatorIndex = (buffer) => {
-  const lfIndex = buffer.indexOf("\n\n");
-  const crlfIndex = buffer.indexOf("\r\n\r\n");
-
-  if (lfIndex === -1) return crlfIndex;
-  if (crlfIndex === -1) return lfIndex;
-  return Math.min(lfIndex, crlfIndex);
-};
-
-const getSseSeparatorLength = (buffer, separatorIndex) => {
-  if (separatorIndex < 0) return 0;
-  return buffer.startsWith("\r\n\r\n", separatorIndex) ? 4 : 2;
-};
-
 const parseSseEvent = (rawEventBlock) => {
   const lines = rawEventBlock
     .split(/\r?\n/)
@@ -131,11 +117,13 @@ export async function fetchRecipeRecommendations(ingredients, topK = 5) {
  * 参数:
  * - message: string，用户输入文本。
  * - ingredients: string[]，上下文食材列表。
+ * - sessionId: string，会话标识。
  * - onChunk: (chunk: string, fullText: string) => void，接收流数据的回调。
+ * - signal: AbortSignal，用于中断请求。
  * 返回:
  * - Promise<string>，最终完整的回答。
  */
-export async function sendCookingChatMessage(message, ingredients, sessionId, onChunk) {
+export async function sendCookingChatMessage(message, ingredients, sessionId, onChunk, signal) {
   const baseUrl = import.meta.env.VITE_API_BASE_URL;
   const requestStartedAt = performance.now();
   if (STREAM_DEBUG) {
@@ -152,6 +140,7 @@ export async function sendCookingChatMessage(message, ingredients, sessionId, on
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ message, ingredients, session_id: sessionId }),
+    signal,
   });
 
   if (!response.ok) {
@@ -203,11 +192,16 @@ export async function sendCookingChatMessage(message, ingredients, sessionId, on
       }
 
       sseBuffer += chunk;
-      let separatorIndex = findSseSeparatorIndex(sseBuffer);
-      while (separatorIndex !== -1) {
-        const rawEventBlock = sseBuffer.slice(0, separatorIndex);
-        sseBuffer = sseBuffer.slice(separatorIndex + getSseSeparatorLength(sseBuffer, separatorIndex));
-        const parsedEvent = parseSseEvent(rawEventBlock);
+      // 按双换行符分割 SSE 事件
+      const blocks = sseBuffer.split(/\r?\n\r?\n/);
+      
+      // 最后一个块可能是不完整的，保留到下一轮
+      sseBuffer = blocks.pop() || "";
+
+      for (const block of blocks) {
+        if (!block.trim()) continue;
+        
+        const parsedEvent = parseSseEvent(block);
         if (parsedEvent) {
           if (parsedEvent.event === "content" && parsedEvent.data?.text) {
             fullText += parsedEvent.data.text;
@@ -216,7 +210,6 @@ export async function sendCookingChatMessage(message, ingredients, sessionId, on
             await onChunk(parsedEvent, fullText);
           }
         }
-        separatorIndex = findSseSeparatorIndex(sseBuffer);
       }
     }
   }

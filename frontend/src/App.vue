@@ -15,6 +15,8 @@
           :isGenerating="isGenerating"
           :isUploading="isUploading"
           @send="handleSendMessage"
+          @stop="handleStopGeneration"
+          @deleteMessage="handleDeleteMessage"
         />
       </div>
     </div>
@@ -68,6 +70,7 @@ const currentSessionId = ref(loadStoredCurrentSessionId())
 const isGenerating = ref(false)
 const isUploading = ref(false)
 let pendingPersistTimer = null
+let currentAbortController = null // 用于中断流式请求
 
 const persistSessionState = () => {
   try {
@@ -176,10 +179,11 @@ const stepTypewriter = (msg) => {
     return
   }
 
+  // 增大逐字显示速度，如果目标文本比当前文本长很多，加快追赶速度
   const remaining = targetContent.length - currentContent.length
-  const batchSize = remaining > 120
-    ? TYPEWRITER_BATCH_SIZE * 4
-    : remaining > 40
+  const batchSize = remaining > 100 
+    ? Math.max(TYPEWRITER_BATCH_SIZE * 4, Math.floor(remaining / 10)) 
+    : remaining > 20
       ? TYPEWRITER_BATCH_SIZE * 2
       : TYPEWRITER_BATCH_SIZE
 
@@ -369,28 +373,53 @@ watch(() => currentMessages.value, (newMessages) => {
   }
 }, { deep: true })
 
+// 取消请求
+const handleStopGeneration = () => {
+  if (currentAbortController) {
+    currentAbortController.abort()
+    currentAbortController = null
+  }
+}
+
+// 删除单条消息
+const handleDeleteMessage = (messageId) => {
+  if (!currentSession.value) return
+  
+  const messages = currentSession.value.messages
+  const index = messages.findIndex(m => m.id === messageId)
+  if (index !== -1) {
+    messages.splice(index, 1)
+    flushPersistSessionState()
+  }
+}
+
 // 核心发送逻辑
 const handleSendMessage = async ({ text, image }) => {
   if (!currentSession.value) createNewSession()
+  
+  // 停止之前正在进行的请求
+  handleStopGeneration()
   
   const session = currentSession.value
   const startTime = performance.now()
 
   // 1. 构造并添加用户消息
-  const userMessage = {
+  const userMessageRaw = {
     id: Date.now().toString(),
     role: 'user',
     content: text || '',
     image: image ? URL.createObjectURL(image) : null,
     timestamp: new Date().toISOString()
   }
-  session.messages.push(userMessage)
+  session.messages.push(userMessageRaw)
+  const userMessage = session.messages[session.messages.length - 1] // 获取响应式代理
   flushPersistSessionState()
 
   // 2. 构造并添加 AI 思考状态消息
-  const aiMessage = createAiMessage()
-  aiMessage.id = (Date.now() + 1).toString()
-  session.messages.push(aiMessage)
+  const aiMessageRaw = createAiMessage()
+  aiMessageRaw.id = (Date.now() + 1).toString()
+  session.messages.push(aiMessageRaw)
+  const aiMessage = session.messages[session.messages.length - 1] // 获取响应式代理
   flushPersistSessionState()
   
   try {
@@ -495,8 +524,9 @@ const continueChatFlow = async (text, session, startTime, existingAiMsg = null, 
   let currentAiMsg = existingAiMsg;
   
   if (!currentAiMsg) {
-    currentAiMsg = createAiMessage(prefixContent);
-    session.messages.push(currentAiMsg);
+    const newMsg = createAiMessage(prefixContent);
+    session.messages.push(newMsg);
+    currentAiMsg = session.messages[session.messages.length - 1]; // 获取响应式代理
     flushPersistSessionState()
   } else {
     currentAiMsg.status = AI_MESSAGE_STATUS.STREAMING
@@ -510,6 +540,9 @@ const continueChatFlow = async (text, session, startTime, existingAiMsg = null, 
   }
 
   try {
+    currentAbortController = new AbortController()
+    const signal = currentAbortController.signal
+
     const finalAnswer = await sendCookingChatMessage(
       text, 
       session.contextIngredients || [],
@@ -518,29 +551,50 @@ const continueChatFlow = async (text, session, startTime, existingAiMsg = null, 
         currentAiMsg.status = AI_MESSAGE_STATUS.STREAMING
 
         if (streamEvent.event === 'status') {
-          const { label = '思考中', detail = '', phase = 'thinking' } = streamEvent.data || {}
-          currentAiMsg.thinking = phase !== 'done' && phase !== 'error'
-          setAiStreamState(currentAiMsg, label, detail, phase)
-        } else if (streamEvent.event === 'content') {
-          currentAiMsg.thinking = false
-          syncAiTargetContent(currentAiMsg, `${prefixContent}${fullText}`)
+            const { label = '思考中', detail = '', phase = 'thinking' } = streamEvent.data || {}
+            // 如果收到 answer 阶段（开始输出正文）或者 done 阶段，就关闭顶部的 thinking 转圈
+            if (phase === 'done' || phase === 'error' || phase === 'answer') {
+              currentAiMsg.thinking = false
+            }
+            setAiStreamState(currentAiMsg, label, detail, phase)
+          } else if (streamEvent.event === 'content') {
+          // 收到内容时，使用打字机效果逐步显示
+          const nextContent = `${prefixContent}${fullText}`
+          syncAiTargetContent(currentAiMsg, nextContent)
+          // 强制触发一次会话存储，这也会触发 Vue 的深度响应式更新
+          schedulePersistSessionState(50)
         } else if (streamEvent.event === 'error') {
           throw new Error(streamEvent.data?.message || '流式请求失败')
         } else if (streamEvent.event === 'done') {
-          syncAiTargetContent(currentAiMsg, `${prefixContent}${streamEvent.data?.final_text || fullText}`)
+          currentAiMsg.content = `${prefixContent}${streamEvent.data?.final_text || fullText}`
+          currentAiMsg.targetContent = currentAiMsg.content
         }
-        await new Promise(resolve => requestAnimationFrame(resolve))
-      }
+        // 不再强行 await rAF，而是让 Vue 自然去调度响应式更新，避免阻塞 fetch 循环
+      },
+      signal
     );
     
-    await finalizeAiVisibleContent(currentAiMsg, `${prefixContent}${finalAnswer}`)
+    // 关闭打字机等待，直接完成
+    currentAiMsg.content = `${prefixContent}${finalAnswer}`
+    currentAiMsg.targetContent = currentAiMsg.content
+    stopTypewriter(currentAiMsg, true)
     currentAiMsg.status = AI_MESSAGE_STATUS.DONE
     currentAiMsg.thinking = false
     currentAiMsg.timeTaken = performance.now() - startTime
     setAiStreamState(currentAiMsg, '已完成', '', 'done')
     flushPersistSessionState()
   } catch (error) {
-    handleApiError(error, currentAiMsg, startTime)
+    if (error.name === 'AbortError') {
+      currentAiMsg.status = AI_MESSAGE_STATUS.INTERRUPTED
+      currentAiMsg.thinking = false
+      setAiStreamState(currentAiMsg, '已中断', '已取消生成', 'error')
+      stopTypewriter(currentAiMsg, true)
+      flushPersistSessionState()
+    } else {
+      handleApiError(error, currentAiMsg, startTime)
+    }
+  } finally {
+    currentAbortController = null
   }
 }
 </script>

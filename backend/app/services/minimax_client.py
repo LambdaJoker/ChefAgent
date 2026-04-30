@@ -104,23 +104,6 @@ class MinimaxClient:
             + "请仅依靠已有知识直接回答。"
         )
 
-    def _strip_inline_tool_markup(self, content: str) -> str:
-        if not content:
-            return ""
-        return re.sub(r"\[TOOL_CALL\][\s\S]*?\[/TOOL_CALL\]", "", content, flags=re.IGNORECASE)
-
-    def _extract_inline_web_search_query(self, content: str) -> str | None:
-        if not content:
-            return None
-        match = re.search(
-            r"\[TOOL_CALL\][\s\S]*?web_search[\s\S]*?--query\s+\"([^\"]+)\"[\s\S]*?\[/TOOL_CALL\]",
-            content,
-            flags=re.IGNORECASE,
-        )
-        if match:
-            return match.group(1).strip()
-        return None
-
     async def recognize_ingredients(
         self,
         image_bytes: bytes,
@@ -223,6 +206,43 @@ class MinimaxClient:
         raw_description = parsed.get("raw_description") or content
         cleaned = [str(item).strip() for item in ingredients if str(item).strip()]
         return cleaned, str(raw_description)
+
+    async def _parse_minimax_stream(self, response_stream) -> Any:
+        """统一处理 Minimax 模型的 SSE 流解析，提取 content 和 tool_calls"""
+        async for line in response_stream.aiter_lines():
+            line = line.strip()
+            if not line:
+                continue
+                
+            data_str = line
+            if line.startswith("data: "):
+                data_str = line[6:].strip()
+                
+            if data_str == "[DONE]":
+                break
+                
+            try:
+                data_json = json.loads(data_str)
+                choices = data_json.get("choices") or []
+                if not choices:
+                    continue
+                    
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                
+                content = delta.get("content", "")
+                tool_calls = delta.get("tool_calls", [])
+                
+                # 兼容某些情况下直接返回 message 而不是 delta
+                if not content and not tool_calls:
+                    msg = choice.get("message") or {}
+                    content = msg.get("content", "")
+                    tool_calls = msg.get("tool_calls", [])
+                    
+                if content or tool_calls:
+                    yield {"content": content, "tool_calls": tool_calls}
+            except json.JSONDecodeError:
+                pass
 
     async def cooking_chat_stream(self, message: str, ingredients: list[str], session_id: str | None = None) -> Any:
         """
@@ -378,82 +398,47 @@ class MinimaxClient:
                     async with client.stream("POST", self._text_chat_url, headers=headers, json=payload) as resp:
                         resp.raise_for_status()
 
-                        # 因为 stream=True，我们需要逐行解析
-                        async for line in resp.aiter_lines():
-                            if line.startswith("data: "):
-                                data_str = line[6:].strip()
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    data_json = json.loads(data_str)
-                                    choices = data_json.get("choices") or []
-                                    if choices:
-                                        delta = choices[0].get("delta") or {}
+                        # 统一解析流式响应
+                        async for parsed in self._parse_minimax_stream(resp):
+                            content = parsed.get("content", "")
+                            if content:
+                                first_chunk_count += 1
+                                first_pass_content += content
+                                if not first_model_chunk_logged:
+                                    first_model_chunk_logged = True
+                                    logger.info(
+                                        "chat first-pass first chunk session_id=%s elapsed_ms=%.1f preview=%s",
+                                        session_id,
+                                        (time.perf_counter() - stream_started_at) * 1000,
+                                        content[:80],
+                                    )
+                                    yield self._format_sse_event("status", {
+                                        "phase": "answer",
+                                        "label": "正在生成回答",
+                                        "detail": "已开始输出回答",
+                                    })
+                                # 无论是否使用 web_search，都直接流式输出内容，不要做过滤
+                                yield self._format_sse_event("content", {"text": content})
 
-                                        # 处理文本内容
-                                        content = delta.get("content", "")
-                                        if content:
-                                            first_chunk_count += 1
-                                            first_pass_content += content
-                                            if not first_model_chunk_logged:
-                                                first_model_chunk_logged = True
-                                                logger.info(
-                                                    "chat first-pass first chunk session_id=%s elapsed_ms=%.1f preview=%s",
-                                                    session_id,
-                                                    (time.perf_counter() - stream_started_at) * 1000,
-                                                    content[:80],
-                                                )
-                                            if not use_web_search:
-                                                visible_content = self._strip_inline_tool_markup(content)
-                                                if visible_content.strip():
-                                                    yield self._format_sse_event("status", {
-                                                        "phase": "answer",
-                                                        "label": "正在生成回答",
-                                                        "detail": "已开始输出回答",
-                                                    })
-                                                    yield self._format_sse_event("content", {"text": visible_content})
+                            # 处理工具调用
+                            tool_calls = parsed.get("tool_calls", [])
+                            if tool_calls:
+                                is_tool_call = True
+                                for tc in tool_calls:
+                                    idx = tc.get("index", 0)
+                                    if idx not in tool_calls_accumulator:
+                                        tool_calls_accumulator[idx] = {
+                                            "id": tc.get("id", ""),
+                                            "type": "function",
+                                            "function": {"name": tc.get("function", {}).get("name", ""), "arguments": ""}
+                                        }
 
-                                        # 处理工具调用
-                                        tool_calls = delta.get("tool_calls")
-                                        if tool_calls:
-                                            is_tool_call = True
-                                            for tc in tool_calls:
-                                                idx = tc.get("index", 0)
-                                                if idx not in tool_calls_accumulator:
-                                                    tool_calls_accumulator[idx] = {
-                                                        "id": tc.get("id", ""),
-                                                        "type": "function",
-                                                        "function": {"name": tc.get("function", {}).get("name", ""), "arguments": ""}
-                                                    }
-
-                                                # 拼接参数
-                                                func = tc.get("function", {})
-                                                if "arguments" in func:
-                                                    tool_calls_accumulator[idx]["function"]["arguments"] += func["arguments"]
-                                except json.JSONDecodeError as e:
-                                    logger.debug(f"第一轮流式请求 JSON 解析失败: {e} - raw: {data_str}")
-                                    pass
+                                    # 拼接参数
+                                    func = tc.get("function", {})
+                                    if "arguments" in func:
+                                        tool_calls_accumulator[idx]["function"]["arguments"] += func["arguments"]
                                 
-                    final_response_content = ""
-
-                    if not is_tool_call and use_web_search:
-                        inline_query = self._extract_inline_web_search_query(first_pass_content)
-                        if inline_query:
-                            is_tool_call = True
-                            tool_calls_accumulator[0] = {
-                                "id": "inline-web-search",
-                                "type": "function",
-                                "function": {
-                                    "name": "web_search",
-                                    "arguments": json.dumps({"query": inline_query}, ensure_ascii=False),
-                                },
-                            }
-                            logger.info(
-                                "chat inline tool-call detected session_id=%s query=%s elapsed_ms=%.1f",
-                                session_id,
-                                inline_query,
-                                (time.perf_counter() - stream_started_at) * 1000,
-                            )
+                    final_response_content = first_pass_content
 
                     # 如果发生工具调用，我们需要执行工具，然后发起第二轮请求
                     if is_tool_call:
@@ -472,7 +457,7 @@ class MinimaxClient:
                         # 构造助手消息
                         assistant_message = {
                             "role": "assistant",
-                            "content": self._strip_inline_tool_markup(first_pass_content).strip(),
+                            "content": first_pass_content.strip(),
                             "tool_calls": list(tool_calls_accumulator.values()),
                         }
                         messages_payload = [system_payload] + history_payloads + [user_payload, assistant_message]
@@ -577,95 +562,27 @@ class MinimaxClient:
                         
                         async with client.stream("POST", self._text_chat_url, headers=headers, json=payload) as resp2:
                             resp2.raise_for_status()
-                            async for line in resp2.aiter_lines():
-                                if line.startswith("data: "):
-                                    data_str = line[6:].strip()
-                                    if data_str == "[DONE]":
-                                        break
-                                    try:
-                                        data_json = json.loads(data_str)
-                                        choices = data_json.get("choices") or []
-                                        if choices:
-                                            delta = choices[0].get("delta") or {}
-                                            content = delta.get("content", "")
-                                            if content:
-                                                second_chunk_count += 1
-                                                final_response_content += content
-                                                if not second_model_chunk_logged:
-                                                    second_model_chunk_logged = True
-                                                    logger.info(
-                                                        "chat second-pass first chunk session_id=%s elapsed_ms=%.1f preview=%s",
-                                                        session_id,
-                                                        (time.perf_counter() - stream_started_at) * 1000,
-                                                        content[:80],
-                                                    )
-                                                    yield self._format_sse_event("status", {
-                                                        "phase": "answer",
-                                                        "label": "正在生成回答",
-                                                        "detail": "已开始输出最终答案",
-                                                    })
-                                                yield self._format_sse_event("content", {"text": content})
-                                    except json.JSONDecodeError as e:
-                                        logger.debug(f"第二轮流式请求 JSON 解析失败 (data): {e} - raw: {data_str}")
-                                        pass
-                                elif line.strip() == "":
-                                    continue
-                                else:
-                                    try:
-                                        data_json = json.loads(line)
-                                        choices = data_json.get("choices") or []
-                                        if choices:
-                                            delta = choices[0].get("delta") or {}
-                                            content = delta.get("content", "")
-                                            if content:
-                                                second_chunk_count += 1
-                                                final_response_content += content
-                                                if not second_model_chunk_logged:
-                                                    second_model_chunk_logged = True
-                                                    logger.info(
-                                                        "chat second-pass first raw-line chunk session_id=%s elapsed_ms=%.1f preview=%s",
-                                                        session_id,
-                                                        (time.perf_counter() - stream_started_at) * 1000,
-                                                        content[:80],
-                                                    )
-                                                    yield self._format_sse_event("status", {
-                                                        "phase": "answer",
-                                                        "label": "正在生成回答",
-                                                        "detail": "已开始输出最终答案",
-                                                    })
-                                                yield self._format_sse_event("content", {"text": content})
-                                            else:
-                                                msg = choices[0].get("message") or {}
-                                                msg_content = msg.get("content", "")
-                                                if msg_content:
-                                                    second_chunk_count += 1
-                                                    final_response_content += msg_content
-                                                    if not second_model_chunk_logged:
-                                                        second_model_chunk_logged = True
-                                                        logger.info(
-                                                            "chat second-pass first message chunk session_id=%s elapsed_ms=%.1f preview=%s",
-                                                            session_id,
-                                                            (time.perf_counter() - stream_started_at) * 1000,
-                                                            msg_content[:80],
-                                                        )
-                                                        yield self._format_sse_event("status", {
-                                                            "phase": "answer",
-                                                            "label": "正在生成回答",
-                                                            "detail": "已开始输出最终答案",
-                                                        })
-                                                    yield self._format_sse_event("content", {"text": msg_content})
-                                    except json.JSONDecodeError as e:
-                                        logger.debug(f"第二轮流式请求 JSON 解析失败 (raw line): {e} - raw: {line}")
-                                        pass
+                            async for parsed in self._parse_minimax_stream(resp2):
+                                content = parsed.get("content", "")
+                                if content:
+                                    second_chunk_count += 1
+                                    final_response_content += content
+                                    if not second_model_chunk_logged:
+                                        second_model_chunk_logged = True
+                                        logger.info(
+                                            "chat second-pass first chunk session_id=%s elapsed_ms=%.1f preview=%s",
+                                            session_id,
+                                            (time.perf_counter() - stream_started_at) * 1000,
+                                            content[:80],
+                                        )
+                                        yield self._format_sse_event("status", {
+                                            "phase": "answer",
+                                            "label": "正在生成回答",
+                                            "detail": "已开始输出最终答案",
+                                        })
+                                    yield self._format_sse_event("content", {"text": content})
                     else:
-                        final_response_content = self._strip_inline_tool_markup(first_pass_content).strip()
-                        if use_web_search and final_response_content:
-                            yield self._format_sse_event("status", {
-                                "phase": "answer",
-                                "label": "正在生成回答",
-                                "detail": "已开始输出回答",
-                            })
-                            yield self._format_sse_event("content", {"text": final_response_content})
+                        final_response_content = first_pass_content.strip()
 
                     logger.info(
                         "chat stream done session_id=%s first_pass_chunks=%s second_pass_chunks=%s total_length=%s elapsed_ms=%.1f",
