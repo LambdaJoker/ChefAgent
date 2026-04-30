@@ -19,14 +19,31 @@
       ref="messagesContainer"
     >
       <template v-if="messages.length === 0">
-        <div class="h-full flex flex-col items-center justify-center text-center text-gray-500 animate-in fade-in duration-500">
-          <div class="w-16 h-16 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center mb-6 shadow-sm">
-            <ChefHat class="w-8 h-8" />
+        <div class="h-full flex flex-col items-center justify-center text-center animate-in fade-in duration-500 max-w-2xl mx-auto px-4">
+          <div class="w-20 h-20 bg-gradient-to-br from-blue-50 to-indigo-50 text-blue-600 rounded-3xl flex items-center justify-center mb-8 shadow-sm border border-blue-100/50 relative">
+            <ChefHat class="w-10 h-10" />
+            <div class="absolute -top-2 -right-2 w-6 h-6 bg-yellow-100 rounded-full flex items-center justify-center shadow-sm">✨</div>
           </div>
-          <h2 class="text-2xl font-semibold text-gray-800 mb-2">有什么我可以帮您的？</h2>
-          <p class="max-w-sm text-sm text-gray-400">
+          <h2 class="text-3xl font-bold text-gray-800 mb-4 tracking-tight">有什么我可以帮您的？</h2>
+          <p class="text-base text-gray-500 leading-relaxed mb-10 max-w-md">
             我是您的专属 ChefAgent。您可以直接告诉我家里有什么食材，或者上传食材图片，我来为您量身定制菜谱。
           </p>
+          
+          <!-- 预设快速提问 -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full">
+            <button 
+              v-for="(preset, idx) in presetPrompts" 
+              :key="idx"
+              @click="handlePresetClick(preset.text)"
+              class="flex flex-col items-start p-4 bg-white border border-gray-200 rounded-2xl hover:border-blue-300 hover:shadow-md hover:bg-blue-50/30 transition-all text-left group"
+            >
+              <div class="flex items-center gap-2 mb-1.5">
+                <component :is="preset.icon" class="w-4 h-4 text-blue-500" />
+                <span class="font-medium text-gray-700 group-hover:text-blue-700 transition-colors">{{ preset.title }}</span>
+              </div>
+              <span class="text-sm text-gray-500 line-clamp-1">{{ preset.desc }}</span>
+            </button>
+          </div>
         </div>
       </template>
 
@@ -47,7 +64,7 @@
             class="max-w-[85%] md:max-w-[75%] rounded-2xl px-5 py-3 relative group"
             :class="[
               msg.role === 'user' 
-                ? 'bg-gray-100 text-gray-800 rounded-br-sm' 
+                ? 'bg-blue-500 text-white rounded-br-sm shadow-md' 
                 : 'bg-white border border-gray-100 shadow-sm text-gray-800 rounded-bl-sm'
             ]"
           >
@@ -77,6 +94,19 @@
               >
                 {{ getInterruptedNotice(msg.content) }}
               </div>
+              
+              <!-- 接下来想问 -->
+              <div v-if="msg.suggestions && msg.suggestions.length > 0 && msg.status !== 'streaming'" class="mt-4 flex flex-wrap gap-2 animate-in fade-in slide-in-from-bottom-1">
+                <button
+                  v-for="(suggestion, sIdx) in msg.suggestions"
+                  :key="sIdx"
+                  @click="handlePresetClick(suggestion)"
+                  class="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50/50 hover:bg-blue-100/80 text-blue-600 text-[13px] rounded-lg border border-blue-100 transition-colors shadow-sm"
+                >
+                  <Sparkles class="w-3 h-3" />
+                  {{ suggestion }}
+                </button>
+              </div>
             </template>
 
             <!-- Plain Text (User) -->
@@ -84,7 +114,7 @@
               {{ msg.content }}
               
               <!-- User Actions -->
-              <div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity absolute -bottom-8 right-0 text-xs text-gray-400 font-mono w-max">
+              <div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity absolute -bottom-8 right-0 text-xs text-gray-400 font-mono w-max bg-white/80 backdrop-blur rounded px-1 shadow-sm">
                 <button 
                   @click="$emit('editMessage', msg)"
                   class="flex items-center gap-1 hover:text-blue-500 transition-colors px-2 py-1 rounded"
@@ -147,6 +177,25 @@
       <!-- Input Box Container -->
       <div class="max-w-4xl mx-auto relative flex flex-col rounded-2xl border border-gray-300 bg-white shadow-sm focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all overflow-hidden">
         
+        <!-- Context Ingredients Display -->
+        <div v-if="contextIngredients.length > 0" class="px-4 pt-3 pb-1 flex flex-wrap gap-2 border-b border-gray-100">
+          <div class="text-xs text-gray-400 self-center mr-1">已记住的食材:</div>
+          <div 
+            v-for="ingredient in contextIngredients" 
+            :key="ingredient"
+            class="flex items-center gap-1.5 px-2.5 py-1 bg-green-50 text-green-700 text-xs rounded-md border border-green-100"
+          >
+            <span>{{ ingredient }}</span>
+            <button 
+              @click="$emit('removeIngredient', ingredient)" 
+              class="hover:text-red-500 hover:bg-green-100 rounded-full p-0.5 transition-colors"
+              title="移除该食材"
+            >
+              <X class="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+
         <!-- Image Preview Area -->
         <div v-if="previewImage" class="px-4 pt-3 pb-1 flex relative group">
           <div class="relative inline-block">
@@ -243,7 +292,7 @@
 
 <script setup>
 import { ref, watch, nextTick, onMounted } from 'vue'
-import { ChefHat, Bot, User, ArrowUp, Image as ImageIcon, Loader2, Clock, X, Copy, Download, Trash2, Pencil } from 'lucide-vue-next'
+import { ChefHat, Bot, User, ArrowUp, Image as ImageIcon, Loader2, Clock, X, Copy, Download, Trash2, Pencil, Sparkles, Utensils, Salad, Flame } from 'lucide-vue-next'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
@@ -252,6 +301,10 @@ const props = defineProps({
   messages: {
     type: Array,
     required: true
+  },
+  contextIngredients: {
+    type: Array,
+    default: () => []
   },
   isGenerating: {
     type: Boolean,
@@ -263,13 +316,27 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['send', 'stop', 'deleteMessage', 'editMessage'])
+const emit = defineEmits(['send', 'stop', 'deleteMessage', 'editMessage', 'removeIngredient'])
 
 const inputMessage = ref('')
 const inputRef = ref(null)
 const messagesContainer = ref(null)
 const fileInput = ref(null)
 const previewImage = ref(null)
+
+const presetPrompts = [
+  { icon: Salad, title: '随便配点什么', desc: '看看冰箱里有什么，我来帮你搭配', text: '我家现在有番茄、鸡蛋、土豆和半个洋葱，能做点什么好吃的？' },
+  { icon: Flame, title: '快手菜推荐', desc: '15分钟内搞定，适合下班后的打工人', text: '推荐几道15分钟内能搞定的快手晚餐，需要具体做法。' },
+  { icon: Utensils, title: '低脂健康餐', desc: '高蛋白低碳水，好吃不怕胖', text: '我想吃得健康点，有没有高蛋白低脂的晚餐食谱推荐？' },
+  { icon: Sparkles, title: '帮我识别图片', desc: '拍张照，立刻告诉你怎么做', text: '请帮我看看这张图片里有哪些食材，并推荐一道菜。' },
+]
+
+const handlePresetClick = (text) => {
+  inputMessage.value = text
+  if (inputRef.value) {
+    inputRef.value.focus()
+  }
+}
 
 // Initialize Markdown-it with highlight.js
 const md = new MarkdownIt({
@@ -286,45 +353,98 @@ const md = new MarkdownIt({
   }
 })
 
+// 处理 <think> 标签的辅助函数
+const _replaceThinkBlocks = (content) => {
+  return content.replace(
+    /<think>([\s\S]*?)<\/think>/g, 
+    (match, innerContent) => {
+      return `<div class="thinking-wrapper mb-4">
+        <details class="thinking-block group">
+          <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
+            <span class="inline-block transition-transform text-[10px] group-open:rotate-90">▶</span>
+            <span>思考过程</span>
+          </summary>
+          <div class="mt-2 pl-3 border-l-2 border-gray-200 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
+        </details>
+      </div>`
+    }
+  )
+}
+
+const _replaceUnclosedThinkBlock = (content) => {
+  return content.replace(
+    /<think>([\s\S]*)$/g, 
+    (match, innerContent) => {
+      return `<div class="thinking-wrapper mb-4">
+        <details open class="thinking-block group">
+          <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
+            <span class="inline-block animate-pulse text-blue-500">●</span>
+            <span>深入思考中...</span>
+          </summary>
+          <div class="mt-2 pl-3 border-l-2 border-blue-100 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
+        </details>
+      </div>`
+    }
+  )
+}
+
+// 处理 <tool> 标签的辅助函数
+const _replaceToolBlocks = (content) => {
+  return content.replace(
+    /<tool>([\s\S]*?)<\/tool>/g, 
+    (match, innerContent) => {
+      return `<div class="tool-wrapper mb-4">
+        <details class="tool-block group">
+          <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
+            <span class="inline-block transition-transform text-[10px] group-open:rotate-90">▶</span>
+            <span class="flex items-center gap-1">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              网络搜索
+            </span>
+          </summary>
+          <div class="mt-2 pl-3 border-l-2 border-purple-200 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
+        </details>
+      </div>`
+    }
+  )
+}
+
+const _replaceUnclosedToolBlock = (content) => {
+  return content.replace(
+    /<tool>([\s\S]*)$/g, 
+    (match, innerContent) => {
+      return `<div class="tool-wrapper mb-4">
+        <details open class="tool-block group">
+          <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
+            <span class="inline-block animate-pulse text-purple-500">●</span>
+            <span class="flex items-center gap-1">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              正在搜索...
+            </span>
+          </summary>
+          <div class="mt-2 pl-3 border-l-2 border-purple-100 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
+        </details>
+      </div>`
+    }
+  )
+}
+
 const renderMarkdown = (content) => {
   if (!content) return ''
   
   let processed = content
   
-  // Handle <think> tags for reasoning models
   if (processed.includes('<think>')) {
-    // Replace all complete <think>...</think> blocks
-    processed = processed.replace(
-      /<think>([\s\S]*?)<\/think>/g, 
-      (match, innerContent) => {
-        return `<div class="thinking-wrapper mb-4">
-          <details class="thinking-block group">
-            <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
-              <span class="inline-block transition-transform text-[10px] group-open:rotate-90">▶</span>
-              <span>思考过程</span>
-            </summary>
-            <div class="mt-2 pl-3 border-l-2 border-gray-200 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
-          </details>
-        </div>`
-      }
-    )
-    
-    // Handle any remaining unclosed <think> tag at the end
+    processed = _replaceThinkBlocks(processed)
     if (processed.includes('<think>')) {
-      processed = processed.replace(
-        /<think>([\s\S]*)$/g, 
-        (match, innerContent) => {
-          return `<div class="thinking-wrapper mb-4">
-            <details open class="thinking-block group">
-              <summary class="cursor-pointer select-none font-medium text-gray-400 text-xs hover:text-gray-600 transition-colors flex items-center gap-1.5 list-none">
-                <span class="inline-block animate-pulse text-blue-500">●</span>
-                <span>深入思考中...</span>
-              </summary>
-              <div class="mt-2 pl-3 border-l-2 border-blue-100 text-xs text-gray-500 whitespace-pre-wrap leading-relaxed">${innerContent || '...'}</div>
-            </details>
-          </div>`
-        }
-      )
+      processed = _replaceUnclosedThinkBlock(processed)
+    }
+  }
+  
+  if (processed.includes('<tool>')) {
+    processed = _replaceToolBlocks(processed)
+    if (processed.includes('<tool>')) {
+      processed = _replaceUnclosedToolBlock(processed)
     }
   }
 

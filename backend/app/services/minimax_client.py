@@ -86,9 +86,13 @@ class MinimaxClient:
             "你是一名私人厨师。请基于用户提供的食材和需求，直接输出给用户可执行、清晰、自然的最终回答。"
             "不要输出你的思考过程、推理过程、内部分析、工具调用说明、协议字段或 [TOOL_CALL] 之类的控制文本。"
             "回答优先给出明确结论和可执行步骤。"
-            "如果适合补充，请在结尾自然加入“下一步建议”，例如可以提前准备什么、接下来怎么炒、可以搭配什么、失败时怎么补救、口味上还能怎么调整。"
             "当用户问做法时，尽量包含：食材准备、步骤、火候/时间要点、常见翻车提醒。"
-            "当信息不足时，可以简短说明需要补充什么，但仍要先给出当前最有帮助的建议。"
+            "当信息不足时，可以简短说明需要补充什么，但仍要先给出当前最有帮助的建议。\n\n"
+            "【强制要求】：\n"
+            "在回答的最后，你必须另起一行，严格使用以下格式输出 2 个与当前话题相关的后续问题，用于引导用户继续对话（格式必须是：\n"
+            "猜你想问：\n"
+            "1. [问题一]\n"
+            "2. [问题二]）\n"
         )
 
         if use_web_search:
@@ -422,6 +426,9 @@ class MinimaxClient:
                             "detail": "模型已决定调用搜索工具",
                         })
                         
+                        # 在前端文本流中注入工具调用的起始标记
+                        yield self._format_sse_event("content", {"text": "\n<tool>正在调用搜索工具查找相关食谱...\n"})
+                        
                         # 构造助手消息
                         assistant_message = {
                             "role": "assistant",
@@ -476,13 +483,15 @@ class MinimaxClient:
                                                 )
                                                 break
                                             except asyncio.TimeoutError:
+                                                status_msg = search_status_messages[
+                                                    min(status_index, len(search_status_messages) - 1)
+                                                ]
                                                 yield self._format_sse_event("status", {
                                                     "phase": "tool",
                                                     "label": "正在搜索",
-                                                    "detail": search_status_messages[
-                                                        min(status_index, len(search_status_messages) - 1)
-                                                    ].strip(),
+                                                    "detail": status_msg.strip(),
                                                 })
+                                                yield self._format_sse_event("content", {"text": f"  - {status_msg}"})
                                                 status_index += 1
                                         # 【优化】：提取核心字段精简返回给大模型的 JSON 体积，避免浪费 token 和干扰
                                         simplified_results = []
@@ -493,12 +502,15 @@ class MinimaxClient:
                                                 "content": item.get("content")
                                             })
                                         tool_result = json.dumps({"results": simplified_results}, ensure_ascii=False)
+                                        yield self._format_sse_event("content", {"text": "  - 搜索完成，成功提取相关食谱信息。</tool>\n\n"})
                                     except Exception as e:
                                         logger.warning(f"Tavily 搜索失败: {e}")
                                         tool_result = f"搜索失败: {str(e)}"
+                                        yield self._format_sse_event("content", {"text": f"  - 搜索失败: {str(e)}</tool>\n\n"})
                                 else:
                                     logger.warning("Tavily API Key 未配置，跳过网络搜索")
                                     tool_result = "Tavily API Key 未配置，无法进行网络搜索。请依靠内部知识库回答。"
+                                    yield self._format_sse_event("content", {"text": "  - 搜索功能未配置，跳过检索。</tool>\n\n"})
                                     
                                 yield self._format_sse_event("status", {
                                     "phase": "tool",

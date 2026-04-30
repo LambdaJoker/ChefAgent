@@ -13,12 +13,14 @@
         <ChatArea
           ref="chatAreaRef"
           :messages="currentMessages"
+          :contextIngredients="currentSession?.contextIngredients || []"
           :isGenerating="isGenerating"
           :isUploading="isUploading"
           @send="handleSendMessage"
           @stop="handleStopGeneration"
           @deleteMessage="handleDeleteMessage"
           @editMessage="handleEditMessage"
+          @removeIngredient="handleRemoveIngredient"
         />
       </div>
     </div>
@@ -214,7 +216,8 @@ const createAiMessage = (initialContent = '') => ({
   thinking: true,
   timeTaken: 0,
   timestamp: new Date().toISOString(),
-  streamState: createStreamState()
+  streamState: createStreamState(),
+  suggestions: []
 })
 
 const isValidAiStatus = (status) => Object.values(AI_MESSAGE_STATUS).includes(status)
@@ -391,6 +394,14 @@ const handleEditMessage = (msgToEdit) => {
   } else {
     console.error("Message not found in current session")
   }
+}
+
+// 删除食材上下文
+const handleRemoveIngredient = (ingredientToRemove) => {
+  if (!currentSession.value) return
+  const currentIngredients = currentSession.value.contextIngredients || []
+  currentSession.value.contextIngredients = currentIngredients.filter(i => i !== ingredientToRemove)
+  flushPersistSessionState()
 }
 
 // 核心发送逻辑
@@ -574,8 +585,20 @@ const continueChatFlow = async (text, session, startTime, existingAiMsg = null, 
       signal
     );
     
+    // 提取并清理接下来想问
+    const suggestionMatch = finalAnswer.match(/接下来想问：\s*\n((?:\d+\.\s*.*\n?)+)/)
+    let cleanAnswer = finalAnswer
+    if (suggestionMatch) {
+      cleanAnswer = finalAnswer.replace(suggestionMatch[0], '').trim()
+      const lines = suggestionMatch[1].split('\n')
+      const suggestions = lines
+        .map(line => line.replace(/^\d+\.\s*(?:\[|【)?([^\]】]+)(?:\]|】)?$/, '$1').trim())
+        .filter(line => line.length > 0)
+      currentAiMsg.suggestions = suggestions
+    }
+    
     // 关闭打字机等待，直接完成
-    currentAiMsg.content = `${prefixContent}${finalAnswer}`
+    currentAiMsg.content = `${prefixContent}${cleanAnswer}`
     currentAiMsg.targetContent = currentAiMsg.content
     stopTypewriter(currentAiMsg)
     currentAiMsg.status = AI_MESSAGE_STATUS.DONE
