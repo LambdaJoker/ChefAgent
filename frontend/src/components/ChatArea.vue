@@ -39,7 +39,7 @@
         >
           <!-- AI Avatar -->
           <div v-if="msg.role === 'ai'" class="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 mr-3 shrink-0 mt-1">
-            <Bot class="w-5 h-5" />
+            <ChefHat class="w-5 h-5" />
           </div>
 
           <!-- Message Bubble -->
@@ -80,20 +80,41 @@
             </template>
 
             <!-- Plain Text (User) -->
-            <div v-else class="whitespace-pre-wrap break-words text-[15px] leading-relaxed">
+            <div v-else class="whitespace-pre-wrap break-words text-[15px] leading-relaxed relative">
               {{ msg.content }}
+              
+              <!-- User Actions -->
+              <div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity absolute -bottom-8 right-0 text-xs text-gray-400 font-mono w-max">
+                <button 
+                  @click="$emit('editMessage', msg)"
+                  class="flex items-center gap-1 hover:text-blue-500 transition-colors px-2 py-1 rounded"
+                  title="编辑并重新发送"
+                  :disabled="isGenerating"
+                  :class="{'cursor-not-allowed opacity-50': isGenerating}"
+                >
+                  <Pencil class="w-3.5 h-3.5" />
+                  <span>编辑</span>
+                </button>
+                <button 
+                  @click="$emit('deleteMessage', msg.id)"
+                  class="flex items-center gap-1 hover:text-red-500 transition-colors px-2 py-1 rounded"
+                  title="删除消息"
+                >
+                  <Trash2 class="w-3.5 h-3.5" />
+                  <span>删除</span>
+                </button>
+              </div>
             </div>
 
-            <!-- Time Taken Indicator & Actions -->
-            <div v-if="msg.status !== 'streaming' && hasContent(msg.content)" class="mt-3 flex items-center justify-between text-xs text-gray-400 font-mono">
-              <div v-if="msg.role === 'ai' && msg.timeTaken" class="flex items-center gap-1.5">
+            <!-- Time Taken Indicator & Actions (AI) -->
+            <div v-if="msg.role === 'ai' && msg.status !== 'streaming' && hasContent(msg.content)" class="mt-3 flex items-center justify-between text-xs text-gray-400 font-mono">
+              <div v-if="msg.timeTaken" class="flex items-center gap-1.5">
                 <Clock class="w-3.5 h-3.5" />
                 <span>耗时 {{ (msg.timeTaken / 1000).toFixed(1) }}s</span>
               </div>
-              <div v-else></div>
-              <div class="flex items-center gap-2">
+              <div v-else class="flex-1"></div>
+              <div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button 
-                  v-if="msg.role === 'ai'"
                   @click="copyToClipboard(msg.content)"
                   class="flex items-center gap-1 hover:text-gray-600 hover:bg-gray-100 transition-colors px-2 py-1 rounded"
                   title="复制内容"
@@ -111,6 +132,11 @@
                 </button>
               </div>
             </div>
+          </div>
+
+          <!-- User Avatar -->
+          <div v-if="msg.role === 'user'" class="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500 ml-3 shrink-0 mt-1 order-last">
+            <User class="w-5 h-5" />
           </div>
         </div>
       </template>
@@ -217,7 +243,7 @@
 
 <script setup>
 import { ref, watch, nextTick, onMounted } from 'vue'
-import { ChefHat, Bot, User, ArrowUp, Image as ImageIcon, Loader2, Clock, X, Copy, Download, Trash2 } from 'lucide-vue-next'
+import { ChefHat, Bot, User, ArrowUp, Image as ImageIcon, Loader2, Clock, X, Copy, Download, Trash2, Pencil } from 'lucide-vue-next'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
@@ -237,7 +263,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['send', 'stop', 'deleteMessage'])
+const emit = defineEmits(['send', 'stop', 'deleteMessage', 'editMessage'])
 
 const inputMessage = ref('')
 const inputRef = ref(null)
@@ -306,15 +332,6 @@ const renderMarkdown = (content) => {
   return md.render(processed) || processed
 }
 
-const escapeHtml = (content) => {
-  return content
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
 const stripThinkContent = (content) => {
   if (!content) return ''
   const withoutOpenThink = content.replace(/<think>[\s\S]*$/g, '')
@@ -325,19 +342,8 @@ const getStreamingVisibleContent = (msg) => {
   return stripThinkContent(msg?.content || '')
 }
 
-const renderStreamingContent = (msg) => {
-  return escapeHtml(getStreamingVisibleContent(msg))
-}
-
 const hasVisibleStreamingContent = (msg) => {
   return Boolean(getStreamingVisibleContent(msg).trim())
-}
-
-const hasRenderableAiContent = (msg) => {
-  if (msg.role !== 'ai') return hasContent(msg.content)
-  return msg.status === 'streaming'
-    ? hasVisibleStreamingContent(msg)
-    : hasContent(msg.content)
 }
 
 const getLatestThinkText = (content) => {
@@ -373,26 +379,6 @@ const getStreamingStatusLabel = (msg) => {
   }
 
   return hasVisibleStreamingContent(msg) ? '继续生成中...' : '正在构思美味...'
-}
-
-const getStreamingStatusDetail = (msg) => {
-  if (msg?.streamState?.detail) return msg.streamState.detail
-
-  const latestThinkText = getLatestThinkText(msg?.content)
-  if (!latestThinkText) return ''
-
-  const searchMatch = latestThinkText.match(/调用工具\s+web_search\s+搜索：(.+?)\.\.\./)
-  if (searchMatch?.[1]) {
-    return searchMatch[1]
-  }
-
-  const detailLine = latestThinkText
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .find(line => !/搜索完成/.test(line))
-
-  return detailLine || ''
 }
 
 const hasContent = (content) => Boolean(content && content.trim())
@@ -521,4 +507,19 @@ const exportChat = () => {
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
 }
+
+// 暴露给父组件的方法
+defineExpose({
+  setInputMessage: (text) => {
+    console.log("ChatArea setInputMessage", text)
+    inputMessage.value = text
+    nextTick(() => adjustHeight())
+  },
+  focusInput: () => {
+    console.log("ChatArea focusInput")
+    if (inputRef.value) {
+      inputRef.value.focus()
+    }
+  }
+})
 </script>

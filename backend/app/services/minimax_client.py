@@ -104,6 +104,28 @@ class MinimaxClient:
             + "请仅依靠已有知识直接回答。"
         )
 
+    async def _do_recognize(self, prompt_text: str, image_url_or_data: str) -> tuple[list[str], str]:
+        if not self.settings.vision_api_key:
+            if self.settings.allow_mock_without_key:
+                return ["鸡蛋", "番茄", "西兰花"], "检测到鸡蛋、番茄、西兰花等常见食材。"
+            raise ValueError("VISION_API_KEY 未配置，无法进行图片识别。")
+
+        payload = {
+            "model": self.settings.vision_model,
+            "temperature": 0.2,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": str(prompt_text)},
+                    {"type": "image_url", "image_url": {"url": image_url_or_data}},
+                ],
+            }],
+        }
+        content = await self._call_vision(payload)
+        parsed = self._parse_json(content)
+        ingredients = [str(item).strip() for item in parsed.get("ingredients", []) if str(item).strip()]
+        return ingredients, str(parsed.get("raw_description", content))
+
     async def recognize_ingredients(
         self,
         image_bytes: bytes,
@@ -127,35 +149,9 @@ class MinimaxClient:
             未配置密钥且禁用 mock 时抛出 ValueError；
             网络或模型响应异常由下层请求抛出异常。
         """
-        if not self.settings.vision_api_key:
-            if self.settings.allow_mock_without_key:
-                return ["鸡蛋", "番茄", "西兰花"], "检测到鸡蛋、番茄、西兰花等常见食材。"
-            raise ValueError("VISION_API_KEY 未配置，无法进行图片识别。")
-
         prompt_text = self._build_recognition_prompt(user_hint)
-
         image_data = base64.b64encode(image_bytes).decode("utf-8")
-        data_uri = f"data:{mime_type};base64,{image_data}"
-
-        payload = {
-            "model": self.settings.vision_model,
-            "temperature": 0.2,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": str(prompt_text)},
-                        {"type": "image_url", "image_url": {"url": data_uri}},
-                    ],
-                }
-            ],
-        }
-        content = await self._call_vision(payload)
-        parsed = self._parse_json(content)
-        ingredients = parsed.get("ingredients") or []
-        raw_description = parsed.get("raw_description") or content
-        cleaned = [str(item).strip() for item in ingredients if str(item).strip()]
-        return cleaned, str(raw_description)
+        return await self._do_recognize(prompt_text, f"data:{mime_type};base64,{image_data}")
 
     async def recognize_ingredients_from_image_url(
         self, image_url: str, user_hint: str | None = None
@@ -176,36 +172,8 @@ class MinimaxClient:
             未配置密钥且禁用 mock 时抛出 ValueError；
             响应非 JSON 时降级为空结构并保留原文。
         """
-        if not self.settings.vision_api_key:
-            if self.settings.allow_mock_without_key:
-                return ["鸡蛋", "番茄", "西兰花"], "检测到鸡蛋、番茄、西兰花等常见食材。"
-            raise ValueError("VISION_API_KEY 未配置，无法进行图片识别。")
-
         prompt_text = self._build_recognition_prompt(user_hint)
-        payload = {
-            "model": self.settings.vision_model,
-            "temperature": 0.2,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_url
-                            }
-                        },
-                    ],
-                }
-            ],
-        }
-        content = await self._call_vision(payload)
-        parsed = self._parse_json(content)
-        ingredients = parsed.get("ingredients") or []
-        raw_description = parsed.get("raw_description") or content
-        cleaned = [str(item).strip() for item in ingredients if str(item).strip()]
-        return cleaned, str(raw_description)
+        return await self._do_recognize(prompt_text, image_url)
 
     async def _parse_minimax_stream(self, response_stream) -> Any:
         """统一处理 Minimax 模型的 SSE 流解析，提取 content 和 tool_calls"""
@@ -649,39 +617,6 @@ class MinimaxClient:
         )
         messages = prompt.format_messages(hint=user_hint or "无")
         return f"{messages[0].content}\n{messages[1].content}"
-
-    async def _call_text(self, payload: dict[str, Any]) -> str:
-        """
-        功能:
-            调用文本模型接口进行简单的一轮对话请求。
-        参数:
-            payload: 模型请求体 JSON。
-        返回值:
-            str: 模型生成的文本内容。
-        关键流程:
-            1) 设置请求头及鉴权。
-            2) 发起 POST 请求。
-            3) 解析并提取模型回复文本。
-        异常处理:
-            超时或网络异常时抛出 RuntimeError。
-        """
-        headers = {
-            "Authorization": f"Bearer {self.settings.text_api_key}",
-            "Content-Type": "application/json",
-        }
-        if self.settings.text_group_id:
-            headers["X-Group-Id"] = self.settings.text_group_id
-
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(self._text_chat_url, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-            return self._extract_content(data)
-        except httpx.TimeoutException:
-            raise RuntimeError("文本模型请求超时，请稍后重试。")
-        except httpx.HTTPError as e:
-            raise RuntimeError(f"文本模型请求失败: {e}")
 
     async def _call_vision(self, payload: dict[str, Any]) -> str:
         """

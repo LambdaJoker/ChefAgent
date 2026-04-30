@@ -11,12 +11,14 @@
       <div class="flex-1 flex flex-col w-full mx-auto shadow-none md:shadow-lg md:rounded-2xl bg-white overflow-hidden border border-transparent md:border-gray-200">
         <!-- 聊天区域组件 -->
         <ChatArea
+          ref="chatAreaRef"
           :messages="currentMessages"
           :isGenerating="isGenerating"
           :isUploading="isUploading"
           @send="handleSendMessage"
           @stop="handleStopGeneration"
           @deleteMessage="handleDeleteMessage"
+          @editMessage="handleEditMessage"
         />
       </div>
     </div>
@@ -65,6 +67,7 @@ const loadStoredCurrentSessionId = () => {
 
 const sessions = ref(loadStoredSessions())
 const currentSessionId = ref(loadStoredCurrentSessionId())
+const chatAreaRef = ref(null)
 
 // UI 状态
 const isGenerating = ref(false)
@@ -150,7 +153,7 @@ const resolveTypewriterWaiters = (msg) => {
   resolvers.forEach(resolve => resolve())
 }
 
-const stopTypewriter = (msg, syncToTarget = false) => {
+const stopTypewriter = (msg) => {
   const state = getTypewriterState(msg)
   if (!state) return
   if (state.frameId) {
@@ -158,7 +161,7 @@ const stopTypewriter = (msg, syncToTarget = false) => {
     state.frameId = null
   }
   state.isRunning = false
-  if (syncToTarget && typeof msg.targetContent === 'string') {
+  if (typeof msg.targetContent === 'string') {
     msg.content = msg.targetContent
   }
   resolveTypewriterWaiters(msg)
@@ -191,13 +194,8 @@ const stepTypewriter = (msg) => {
   state.frameId = requestAnimationFrame(() => stepTypewriter(msg))
 }
 
-const syncAiTargetContent = (msg, nextContent, immediate = false) => {
+const syncAiTargetContent = (msg, nextContent) => {
   msg.targetContent = nextContent
-  if (immediate) {
-    msg.content = nextContent
-    stopTypewriter(msg)
-    return
-  }
 
   const state = getTypewriterState(msg)
   if (!state || state.isRunning) return
@@ -205,31 +203,7 @@ const syncAiTargetContent = (msg, nextContent, immediate = false) => {
   state.frameId = requestAnimationFrame(() => stepTypewriter(msg))
 }
 
-const waitForTypewriterToFinish = (msg) => {
-  const targetContent = msg?.targetContent || msg?.content || ''
-  if ((msg?.content || '') === targetContent) {
-    return Promise.resolve()
-  }
 
-  const state = getTypewriterState(msg)
-  if (!state) return Promise.resolve()
-
-  return new Promise(resolve => {
-    state.resolvers.push(resolve)
-    if (!state.isRunning) {
-      state.isRunning = true
-      state.frameId = requestAnimationFrame(() => stepTypewriter(msg))
-    }
-  })
-}
-
-const finalizeAiVisibleContent = async (msg, finalContent) => {
-  syncAiTargetContent(msg, finalContent)
-  await waitForTypewriterToFinish(msg)
-  msg.content = finalContent
-  delete msg.targetContent
-  stopTypewriter(msg)
-}
 
 const createAiMessage = (initialContent = '') => ({
   id: Date.now().toString(),
@@ -393,6 +367,32 @@ const handleDeleteMessage = (messageId) => {
   }
 }
 
+// 编辑用户消息
+const handleEditMessage = (msgToEdit) => {
+  console.log("handleEditMessage triggered", msgToEdit.id)
+  if (!currentSession.value || isGenerating.value) return
+
+  const messages = currentSession.value.messages
+  const index = messages.findIndex(m => m.id === msgToEdit.id)
+  
+  if (index !== -1) {
+    // 1. 将文本设置回输入框
+    if (chatAreaRef.value) {
+      console.log("Setting input message", msgToEdit.content)
+      chatAreaRef.value.setInputMessage(msgToEdit.content)
+      chatAreaRef.value.focusInput()
+    } else {
+      console.error("chatAreaRef is null")
+    }
+
+    // 2. 截断包含该消息及之后的所有对话历史
+    messages.splice(index)
+    flushPersistSessionState()
+  } else {
+    console.error("Message not found in current session")
+  }
+}
+
 // 核心发送逻辑
 const handleSendMessage = async ({ text, image }) => {
   if (!currentSession.value) createNewSession()
@@ -506,7 +506,7 @@ const handleImageRecognition = async (image, text, session, aiMessage, startTime
 // 处理 API 错误
 const handleApiError = (error, aiMessage, startTime) => {
   console.error('发送消息失败:', error)
-  stopTypewriter(aiMessage, true)
+  stopTypewriter(aiMessage)
   aiMessage.status = AI_MESSAGE_STATUS.INTERRUPTED
   aiMessage.thinking = false
   const errorMessage = `> 请求失败\n\n${error.response?.data?.detail || error.message || '未知错误，请重试。'}`
@@ -577,7 +577,7 @@ const continueChatFlow = async (text, session, startTime, existingAiMsg = null, 
     // 关闭打字机等待，直接完成
     currentAiMsg.content = `${prefixContent}${finalAnswer}`
     currentAiMsg.targetContent = currentAiMsg.content
-    stopTypewriter(currentAiMsg, true)
+    stopTypewriter(currentAiMsg)
     currentAiMsg.status = AI_MESSAGE_STATUS.DONE
     currentAiMsg.thinking = false
     currentAiMsg.timeTaken = performance.now() - startTime
@@ -588,7 +588,7 @@ const continueChatFlow = async (text, session, startTime, existingAiMsg = null, 
       currentAiMsg.status = AI_MESSAGE_STATUS.INTERRUPTED
       currentAiMsg.thinking = false
       setAiStreamState(currentAiMsg, '已中断', '已取消生成', 'error')
-      stopTypewriter(currentAiMsg, true)
+      stopTypewriter(currentAiMsg)
       flushPersistSessionState()
     } else {
       handleApiError(error, currentAiMsg, startTime)
